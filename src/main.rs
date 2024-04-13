@@ -1,67 +1,101 @@
-use serde::Deserialize;
-use reqwest::{Client, Error, Response};
+use dotenv::dotenv;
+use teloxide::{dispatching::dialogue::InMemStorage,  prelude::*};
 
-mod models;
 
-#[derive(Deserialize)]
-struct TelegramUpdate {
-    message: Option<TelegramMessage>
+type MyDialogue = Dialogue<State, InMemStorage<State>>;
+type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+#[derive(Clone, Default)]
+pub enum State {
+    #[default]
+    Start,
+    ReceiveFullName,
+    ReceiveAge {
+        full_name: String,
+    },
+    ReceiveLocation {
+        full_name: String,
+        age: u8,
+    },
 }
 
-#[derive(Deserialize)]
-struct TelegramMessage {
-    chat: TelegramChat,
-    text: Option<String>
-}
 
-#[derive(Deserialize)]
-struct TelegramChat {
-    id: i64
-}
 
 #[tokio::main]
 async fn main() {
-    const TELEGRAM_BOT_TOKEN: &str = "7095767919:AAG9h7FA8-KnAvIrnBc6LdMWS-5S8yK6phU";
-    let client = Client::new();
+    dotenv().ok(); // Loads .env file
 
-    let url = format!("https://api.telegram.org/bot{}/getUpdates", TELEGRAM_BOT_TOKEN);
+    pretty_env_logger::init();
+    log::info!("Starting throw dice bot...");
 
-    let res = client.get(&url).send().await;
+    let bot = Bot::from_env();
+
+    Dispatcher::builder(
+        bot,
+        Update::filter_message()
+        .enter_dialogue::<Message, InMemStorage<State>, State>()
+        .branch(dptree::case![State::Start].endpoint(start))
+        .branch(dptree::case![State::ReceiveFullName].endpoint(receive_full_name))
+        .branch(dptree::case![State::ReceiveAge { full_name }].endpoint(receive_age))
+        .branch(dptree::case![State::ReceiveLocation { full_name, age } ].endpoint(receive_location))
+    )
+    .dependencies(dptree::deps![InMemStorage::<State>::new()])
+    .enable_ctrlc_handler()
+    .build()
+    .dispatch()
+    .await;
 
 
-    match res {
-        Ok(res) => {
-            println!("RESULT:\n {}", res.text().await.unwrap());
+}
+
+async fn start(bot: Bot, dialogue: MyDialogue, msg: Message) -> HandlerResult {
+    bot.send_message(msg.chat.id, "Hey, what is your name?").await?;
+    dialogue.update(State::ReceiveFullName).await?;
+    Ok(())
+}
+
+
+async fn receive_full_name(bot: Bot, dialogue: MyDialogue, msg: Message) -> HandlerResult {
+    match msg.text() {
+        Some(text) => {
+            bot.send_message(msg.chat.id, "How old are you?").await?;
+            dialogue.update(State::ReceiveAge { full_name: text.into() }).await?;
         },
-        Err(err) => {
-            println!("Error: {}", err);
+        None => {
+            bot.send_message(msg.chat.id, "Send me plain text").await?;
+        },
+    }
+    Ok(())
+}
+
+async fn receive_age(bot: Bot, dialogue: MyDialogue, full_name: String, msg: Message) -> HandlerResult {
+    match msg.text().map(|text| text.parse::<u8>()) {
+        Some(Ok(age)) => {
+
+            bot.send_message(msg.chat.id, "What's your location?").await?;
+            dialogue.update(State::ReceiveLocation { full_name, age }).await?;
+
+        },
+        _ => {
+            bot.send_message(msg.chat.id, "Send me a number.").await?;
         }
     }
-    // loop {
 
-    //     // let updates: Vec<TelegramUpdate> = res.json().await.unwrap();
-
-    //     // for update in updates {
-    //     //     if let Some(message) = update.message {
-    //     //         if let Some(text) = message.text {
-
-    //     //             let chat_id = message.chat.id;
-    //     //             let response_text = format!("Echo: {}", text);
-
-    //     //             let send_message_url = format!(
-    //     //                 "https://api.telegram.org/bot{}/sendMessage?chat_id={}&text={}",
-    //     //                 TELEGRAM_BOT_TOKEN, chat_id, response_text
-    //     //             );
-
-    //     //             let _ = client.get(&send_message_url).send().await;
-
-    //     //         }
-    //     //     }
-    //     // }
-
-    //     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-    // }
+    Ok(())
+}
 
 
+async fn receive_location(bot: Bot, dialogue: MyDialogue, (full_name, age): (String, u8), msg: Message) -> HandlerResult {
+    match msg.text() {
+        Some(location) => {
+            let report = format!("Full name: {full_name}\nAge: {age}\nLocation: {location}");
+            bot.send_message(msg.chat.id, report).await?;
+            dialogue.exit().await?;  
+        },
+        None => {
+            bot.send_message(msg.chat.id, "Send me just text").await?;
+        }
+    }
+
+    Ok(())
 }
